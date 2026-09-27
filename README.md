@@ -3,7 +3,9 @@
 Unattended monthly maintenance for a Raspberry Pi running **Pi-hole + Unbound**.
 Once a month it backs up Pi-hole, patches the OS and Pi-hole, checks that the DNS
 services are still running, and reboots only when everything went well. If any step fails,
-it pushes an alert to your phone through [ntfy](https://ntfy.sh).
+it pushes an alert to your phone through [ntfy](https://ntfy.sh). A
+[healthchecks.io](https://healthchecks.io) dead-man switch covers the failures the Pi
+can't report itself: it's off, offline, or the job never ran.
 
 Built for a home network where the Pi is the DNS server for every device, so a
 bad upgrade that goes unnoticed means the whole house loses the internet.
@@ -39,12 +41,17 @@ flowchart LR
     script --> apt["apt-get / pihole -up"]
     script --> log[("/var/log/pi-maintenance.log")]
     script -- "on failure" --> ntfy["ntfy topic"] --> phone["Phone"]
+    script -- "/start, success, /fail" --> hc["healthchecks.io"]
+    hbcron["cron<br/>every 5 min"] --> hb["pi-heartbeat.sh"] -- ping --> hc
+    hc -- "late or /fail" --> phone
 ```
 
 ```
 .
 ├── bin/pi-maintenance.sh             # the maintenance script -> /usr/local/bin/
+├── bin/pi-heartbeat.sh               # dead-man switch ping    -> /usr/local/bin/
 ├── etc/cron.d/pi-maintenance         # schedule                -> /etc/cron.d/
+├── etc/cron.d/pi-heartbeat           # heartbeat, every 5 min  -> /etc/cron.d/
 ├── etc/logrotate.d/pi-maintenance    # yearly log rotation     -> /etc/logrotate.d/
 ├── etc/pi-maintenance.conf.example   # documented config template
 ├── install.sh                        # installs all of the above
@@ -70,8 +77,10 @@ sudo ./install.sh
 1. Takes a Teleporter backup before changing anything.
 2. On first install, creates `/etc/pi-maintenance.conf` (owner root, mode 600) with a
    **random ntfy topic**, asks for the Taildrop device name, and prints the topic once.
-3. Installs the script, cron job and logrotate rule.
-4. Sends a test alert.
+3. Asks for the healthchecks.io ping URLs if they're missing (blank skips them; see
+   [Dead-man switch](#dead-man-switch)).
+4. Installs the scripts, cron jobs and logrotate rule.
+5. Sends a test alert, and a first heartbeat if its URL is set.
 
 Subscribe to the printed topic in the ntfy app (Android/iOS/web) before
 the test alert is sent. To re-send one later:
@@ -136,6 +145,42 @@ A run where the package mirror was unreachable and the PC was asleep:
 > **pihole maintenance failed**
 > Failed: apt-update. Warnings: Taildrop to &lt;pc&gt; failed (PC offline?); backup kept on the Pi. See /var/log/pi-maintenance.log on pihole.
 
+## Dead-man switch
+
+ntfy alerts are *pushed* by the Pi, so they can't tell you about a Pi that is off,
+frozen, offline, or whose cron has stopped. Silence looks the same as "all good".
+A dead-man switch flips this around: the Pi checks in with
+[healthchecks.io](https://healthchecks.io) on a schedule, and **healthchecks.io
+alerts you when a check-in is late**. Nothing on the Pi has to work for that alert
+to go out.
+
+Two checks:
+
+| Check | Pinged by | What it catches | Suggested settings |
+|-------|-----------|-----------------|--------------------|
+| **Heartbeat** | `pi-heartbeat.sh`, every 5 min from `/etc/cron.d/pi-heartbeat` | Pi off, frozen or offline; cron not running. If the Pi resolves DNS through its own Pi-hole, a broken DNS stack too | Simple, period 5 min, grace 10 min |
+| **Maintenance** | `pi-maintenance.sh`: `/start` when it begins, then success or `/fail` | A failed run; a run that never started; a run that started and never finished (hung, or the Pi didn't come back from the reboot) | Cron `0 4 1 * *` in the Pi's time zone, grace 3 hours (the upgrade steps can each take up to `STEP_TIMEOUT`) |
+
+Setup:
+
+1. Create both checks on healthchecks.io and connect them to a notification channel
+   (the ntfy integration or the phone app both work).
+2. Run `sudo ./install.sh` and paste the two ping URLs when asked. They're stored only in
+   `/etc/pi-maintenance.conf`. Anyone with a ping URL can fake a ping, so treat them
+   like the ntfy topic.
+3. The heartbeat goes green right away. The maintenance check stays "new" (and silent)
+   until the first run. Run `sudo pi-maintenance.sh` by hand to arm it now.
+
+If a URL is blank, that part is skipped silently. Curl uses `-m 10 --retry 5`, so one
+flaky request doesn't cause a false alarm, and a heartbeat always finishes long before
+the next one. `sudo hardening/verify.sh` shows whether each URL is set (never the URL
+itself) and the result of the last heartbeat.
+
+**Log lines on failure (opt-in).** With `HC_SEND_LOG=true`, a `/fail` ping carries the last
+20 lines of the log, so the context is right there in healthchecks.io. Those lines can
+include the hostname, backup paths (with your username), the Taildrop PC name and apt
+output, which is why it's off unless you say yes during install.
+
 ## Design notes
 
 - **Fail safe, not fail silent.** The first version of this job ran every command
@@ -158,7 +203,11 @@ A run where the package mirror was unreachable and the PC was asleep:
   generated randomly on the Pi, stored only in the root-only config, and never committed.
   For stronger guarantees, point `NTFY_SERVER` at a self-hosted ntfy with access tokens.
 - **Alerts contain no log content**, only step names and the hostname, because the
-  public ntfy server is a third party.
+  public ntfy server is a third party. healthchecks.io is also a third party: it gets
+  log lines only if you opt in with `HC_SEND_LOG=true`.
+- **healthchecks.io ping URLs are secrets too.** Like the ntfy topic, they live only in
+  the root-only config. `install.sh` accepts only URL-safe characters, because the
+  config is sourced as root.
 - **Backups contain your Pi-hole configuration.** They're created with `umask 077`
   (root-only), kept on the Pi, sent only inside your tailnet, and gitignored.
 - **Unattended upgrades carry risk.** This is mitigated by the pre-upgrade backup,
@@ -177,7 +226,8 @@ optional.
 ```bash
 sudo hardening/harden.sh              # account to check defaults to the one you sudo from
 sudo hardening/harden.sh --user <user>
-sudo hardening/verify.sh              # read-only; prints status and OK/FAIL checks
+sudo hardening/verify.sh              # read-only; prints status and OK/FAIL checks,
+                                      # including the dead-man switch
 ```
 
 | Part | What it does | What it stops |

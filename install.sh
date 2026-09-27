@@ -5,8 +5,9 @@
 # 1. Takes a Teleporter backup before changing anything.
 # 2. Creates /etc/pi-maintenance.conf on first install, with a random ntfy
 #    topic that is printed once here and never leaves the Pi otherwise.
-# 3. Installs the script, cron job and logrotate rule.
-# 4. Sends a test alert.
+# 3. Asks for the healthchecks.io ping URLs if they're missing from the config.
+# 4. Installs the scripts, cron jobs and logrotate rule.
+# 5. Sends a test alert and a first heartbeat.
 
 set -euo pipefail
 umask 077
@@ -50,10 +51,48 @@ else
     echo "==> Keeping existing $CONF"
 fi
 
+# conf_get KEY: print KEY's value from $CONF (empty if unset).
+conf_get() { (. "$CONF"; printf '%s' "${!1:-}"); }
+
+# conf_set KEY VALUE: replace KEY's line in $CONF, or append one.
+# VALUE must not contain | or & (ask_hc_url only accepts URL-safe characters).
+conf_set() {
+    if grep -q "^$1=" "$CONF"; then
+        sed -i "s|^$1=.*|$1=$2|" "$CONF"
+    else
+        echo "$1=$2" >>"$CONF"
+    fi
+}
+
+# ask_hc_url KEY DESCRIPTION: prompt for a ping URL if KEY is missing or blank.
+# $CONF is sourced as root, so only accept characters that are inert in a shell.
+ask_hc_url() {
+    local url
+    [[ -z $(conf_get "$1") ]] || return 0
+    while :; do
+        read -rp "healthchecks.io ping URL for $2 (blank to skip): " url
+        [[ -z $url || $url =~ ^https://[A-Za-z0-9._/:%+=,@-]+$ ]] && break
+        echo "    That doesn't look like a ping URL (https://hc-ping.com/...). Try again." >&2
+    done
+    conf_set "$1" "$url"
+}
+
+echo "==> healthchecks.io dead-man switch (see README; blank skips it)"
+ask_hc_url HC_HEARTBEAT_URL "the 5-minute heartbeat"
+ask_hc_url HC_MAINT_URL "the monthly maintenance run"
+if [[ -n $(conf_get HC_MAINT_URL) ]] && ! grep -q '^HC_SEND_LOG=' "$CONF"; then
+    echo "    Failure pings can carry the last 20 log lines. They can include the"
+    echo "    hostname, backup paths (with your username) and apt output."
+    read -rp "Attach them? [y/N] " yn
+    if [[ $yn == [yY]* ]]; then conf_set HC_SEND_LOG true; else conf_set HC_SEND_LOG false; fi
+fi
+
 echo "==> Installing files"
-bash -n bin/pi-maintenance.sh
+bash -n bin/pi-maintenance.sh bin/pi-heartbeat.sh
 install -o root -g root -m 755 bin/pi-maintenance.sh /usr/local/bin/pi-maintenance.sh
+install -o root -g root -m 755 bin/pi-heartbeat.sh /usr/local/bin/pi-heartbeat.sh
 install -o root -g root -m 644 etc/cron.d/pi-maintenance /etc/cron.d/pi-maintenance
+install -o root -g root -m 644 etc/cron.d/pi-heartbeat /etc/cron.d/pi-heartbeat
 install -o root -g root -m 644 etc/logrotate.d/pi-maintenance /etc/logrotate.d/pi-maintenance
 
 if [[ -n $new_topic ]]; then
@@ -70,4 +109,10 @@ fi
 
 echo "==> Sending test alert"
 /usr/local/bin/pi-maintenance.sh --test-alert
+
+if [[ -n $(conf_get HC_HEARTBEAT_URL) ]]; then
+    echo "==> Sending first heartbeat"
+    /usr/local/bin/pi-heartbeat.sh || true
+    echo "    $(cat /run/pi-heartbeat.status 2>/dev/null || echo 'no result recorded')"
+fi
 echo "==> Done. Next scheduled run: 04:00 on the 1st of the month."

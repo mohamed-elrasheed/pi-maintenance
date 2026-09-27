@@ -1,0 +1,12 @@
+# /etc/cron.d/pi-heartbeat - dead-man switch: ping healthchecks.io every 5 minutes.
+#
+# If these pings stop (Pi off, offline, frozen, cron not running), healthchecks.io
+# alerts you. pi-heartbeat.sh does nothing until HC_HEARTBEAT_URL is set in
+# /etc/pi-maintenance.conf. MAILTO="" because a failed ping is reported by
+# healthchecks.io, and the last result is kept in /run/pi-heartbeat.status.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+
+# min hour day-of-month month day-of-week user command
+*/5 * * * * root /usr/local/bin/pi-heartbeat.sh

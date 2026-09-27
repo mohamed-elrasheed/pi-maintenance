@@ -17,3 +17,16 @@ NTFY_ON_SUCCESS=false
 
 # Upper bound for apt-get and pihole -up (timeout(1) syntax).
 STEP_TIMEOUT=45m
+
+# healthchecks.io dead-man switch (blank = skip). Create two checks and paste
+# their ping URLs here. Anyone with a ping URL can fake a ping, so keep them
+# out of git like the ntfy topic. install.sh asks for these if they're missing.
+#   Heartbeat:   pinged every 5 minutes by /etc/cron.d/pi-heartbeat.
+#                Suggested check: period 5 minutes, grace 10 minutes.
+HC_HEARTBEAT_URL=https://hc-ping.com/<heartbeat-uuid>
+#   Maintenance: pi-maintenance.sh pings /start, then success or /fail.
+#                Suggested check: cron "0 4 1 * *" in the Pi's time zone, grace 3 hours.
+HC_MAINT_URL=https://hc-ping.com/<maintenance-uuid>
+# true = attach the last 20 log lines to /fail pings. They can include the
+# hostname, backup paths (with your username) and apt output.
+HC_SEND_LOG=false
