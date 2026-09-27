@@ -47,7 +47,11 @@ flowchart LR
 ├── etc/cron.d/pi-maintenance         # schedule                -> /etc/cron.d/
 ├── etc/logrotate.d/pi-maintenance    # yearly log rotation     -> /etc/logrotate.d/
 ├── etc/pi-maintenance.conf.example   # documented config template
-└── install.sh                        # installs all of the above
+├── install.sh                        # installs all of the above
+└── hardening/                        # optional: firewall, fail2ban, key-only SSH
+    ├── harden.sh                     # applies it (see Hardening below)
+    ├── verify.sh                     # read-only status check
+    └── etc/                          # sshd drop-in and fail2ban jail
 ```
 
 ## Setup
@@ -163,6 +167,60 @@ A run where the package mirror was unreachable and the PC was asleep:
 - **Remote access** is key-based SSH over Tailscale. No ports are exposed to the internet.
 - The repo uses placeholders (`<user>`, `<pc>`, `<pi-tailscale-ip>`) instead of real
   hostnames, IPs or usernames.
+
+## Hardening
+
+`hardening/harden.sh` locks the Pi down so that only your home network and your tailnet
+can reach it, and only with an SSH key. It's separate from the maintenance job and
+optional.
+
+```bash
+sudo hardening/harden.sh              # account to check defaults to the one you sudo from
+sudo hardening/harden.sh --user <user>
+sudo hardening/verify.sh              # read-only; prints status and OK/FAIL checks
+```
+
+| Part | What it does | What it stops |
+|------|--------------|---------------|
+| **ufw** firewall | Denies incoming and routed traffic by default. Allows SSH (22), DNS (53 tcp/udp) and the web UI (80/443) only from `192.168.0.0/24` and `tailscale0`, plus Tailscale's UDP 41641 from anywhere. Allows forwarding from `tailscale0` out of the LAN interface so the Pi still works as an exit node. | Anything outside the LAN/tailnet reaching Pi-hole, SSH or a service you didn't know was listening (e.g. after a router port-forward by mistake). |
+| **fail2ban** | Bans an IP for 1 hour after 5 failed SSH logins in 10 minutes. Never bans loopback, the LAN or the tailnet. | Password guessing. With the firewall on and key-only SSH, this is a second line of defense: it only matters if SSH is ever exposed. |
+| **Key-only SSH** | `/etc/ssh/sshd_config.d/00-hardening.conf`: no passwords, no keyboard-interactive, no root login. | Brute-forced, reused or leaked passwords, and direct root login. |
+
+Safety:
+
+- **Won't lock you out:** refuses to run unless your `~/.ssh/authorized_keys` holds a
+  valid key with permissions sshd accepts.
+- **Validates first:** the SSH drop-in is checked with `sshd -t` and `sshd -T`, and SSH
+  is reloaded only if both pass. Otherwise the previous file is restored.
+- **Firewall safety timer:** the first time ufw is enabled, a timer turns it off again
+  after 5 minutes unless you confirm that a *new* SSH session works.
+- **Backups:** takes a Teleporter backup first, and copies every file it replaces to
+  `/var/backups/pi-hardening/<timestamp>/`.
+- **Safe to re-run:** it only adds ufw rules and never resets them. If you change `LAN=`
+  in `harden.sh` (keep `ignoreip` in the jail file in sync), delete the old rules with
+  `sudo ufw status numbered` and `sudo ufw delete <n>`.
+
+Keep your current SSH session open until `ssh pihole true` works from a new terminal and
+a password login is refused:
+
+```bash
+ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password pihole
+# expected: Permission denied (publickey).
+```
+
+**Why UDP 41641?** Tailscale devices try to talk to each other directly over this
+port. If they can't, the traffic is relayed through Tailscale's DERP servers. It stays
+end-to-end encrypted, but it's slower, which you notice when the Pi is your exit node.
+The port only answers WireGuard packets authenticated with keys from your tailnet, so opening it
+adds very little attack surface.
+
+Undo:
+
+```bash
+sudo ufw disable
+sudo rm /etc/fail2ban/jail.d/sshd.local && sudo systemctl restart fail2ban
+sudo rm /etc/ssh/sshd_config.d/00-hardening.conf && sudo systemctl reload ssh
+```
 
 ## License
 

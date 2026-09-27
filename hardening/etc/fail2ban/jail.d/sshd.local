@@ -1,0 +1,17 @@
+# /etc/fail2ban/jail.d/sshd.local - installed by hardening/harden.sh.
+#
+# Ban an IP for 1 hour after 5 failed SSH logins within 10 minutes.
+# .local files are read after Debian's defaults-debian.conf, so these win.
+#
+# Undo: sudo rm /etc/fail2ban/jail.d/sshd.local && sudo systemctl restart fail2ban
+
+[sshd]
+enabled  = true
+# Debian trixie has no /var/log/auth.log by default; sshd logs to the journal.
+backend  = systemd
+maxretry = 5
+findtime = 10m
+bantime  = 1h
+# Never ban: loopback, the home LAN, and the tailnet (IPv4 CGNAT range and
+# Tailscale's IPv6 range). Keep the LAN in sync with LAN= in harden.sh.
+ignoreip = 127.0.0.1/8 ::1 192.168.0.0/24 100.64.0.0/10 fd7a:115c:a1e0::/48
