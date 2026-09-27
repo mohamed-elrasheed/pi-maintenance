@@ -5,7 +5,8 @@ Once a month it backs up Pi-hole, patches the OS and Pi-hole, checks that the DN
 services are still running, and reboots only when everything went well. If any step fails,
 it pushes an alert to your phone through [ntfy](https://ntfy.sh). A
 [healthchecks.io](https://healthchecks.io) dead-man switch covers the failures the Pi
-can't report itself: it's off, offline, or the job never ran.
+can't report itself: it's off, offline, or the job never ran. Optionally,
+[Uptime Kuma](#monitoring) watches DNS, the web UI and your websites from the Pi.
 
 Built for a home network where the Pi is the DNS server for every device, so a
 bad upgrade that goes unnoticed means the whole house loses the internet.
@@ -55,10 +56,13 @@ flowchart LR
 ├── etc/logrotate.d/pi-maintenance    # yearly log rotation     -> /etc/logrotate.d/
 ├── etc/pi-maintenance.conf.example   # documented config template
 ├── install.sh                        # installs all of the above
-└── hardening/                        # optional: firewall, fail2ban, key-only SSH
-    ├── harden.sh                     # applies it (see Hardening below)
-    ├── verify.sh                     # read-only status check
-    └── etc/                          # sshd drop-in and fail2ban jail
+├── hardening/                        # optional: firewall, fail2ban, key-only SSH
+│   ├── harden.sh                     # applies it (see Hardening below)
+│   ├── verify.sh                     # read-only status check
+│   └── etc/                          # sshd drop-in and fail2ban jail
+└── monitoring/                       # optional: Uptime Kuma dashboard
+    ├── install.sh                    # install/upgrade (see Monitoring below)
+    └── uptime-kuma.service           # systemd unit      -> /etc/systemd/system/
 ```
 
 ## Setup
@@ -181,6 +185,140 @@ itself) and the result of the last heartbeat.
 include the hostname, backup paths (with your username), the Taildrop PC name and apt
 output, which is why it's off unless you say yes during install.
 
+## Monitoring
+
+[Uptime Kuma](https://github.com/louislam/uptime-kuma) is a self-hosted dashboard that
+checks services on a schedule, graphs their history and notifies you when one goes
+down. It runs **on** the Pi, so it can't report the Pi itself being down. That's the
+[dead-man switch](#dead-man-switch)'s job. Kuma covers "the Pi is up, but DNS, the web
+UI or one of your websites is broken".
+
+```bash
+sudo monitoring/install.sh     # install, or upgrade after changing KUMA_VERSION
+sudo hardening/harden.sh       # re-run once, to open port 3001 to the LAN and tailnet
+```
+
+**Then, right away:** open `http://<pi-address>:3001` and create the admin account.
+Kuma has no default password: the *first visitor* sets it up. If it asks which database
+to use, choose **SQLite**.
+
+### Why native Node and not Docker
+
+On a 1 GB Pi 3B+ that is also running Pi-hole and Unbound:
+
+- **RAM.** Docker's daemons use roughly 60–100 MB before Kuma even starts. Native Kuma
+  with a handful of monitors typically needs 100–150 MB. Check headroom with `free -h`
+  and read the **available** column, not **free**: "buff/cache" is file cache the
+  kernel hands back when a program needs it.
+- **Firewall.** Ports published by Docker skip ufw, because Docker inserts its own
+  iptables rules ahead of ufw's. The "LAN and tailnet only" rule for 3001 would
+  silently not apply.
+- **Updates.** Node.js comes from Debian (trixie ships 20.x, and Kuma needs >= 20.4),
+  so the monthly `apt full-upgrade` patches it. There's no third-party repository.
+
+The docs suggest PM2 to keep Kuma running. systemd already does that job, so there's no
+extra daemon, and it adds memory limits and sandboxing:
+
+| Setting | Why |
+|---|---|
+| `User=uptime-kuma` | Runs as a dedicated system user with no login shell, not root |
+| `MemoryHigh=250M`, `MemoryMax=350M`, Node heap 200 MB | A memory leak gets throttled and then restarted, instead of starving DNS |
+| `ProtectSystem=strict`, `ReadWritePaths=/var/lib/uptime-kuma` | Everything except its own data is read-only to it |
+| `NoNewPrivileges`, `ProtectHome`, `PrivateTmp`, `PrivateDevices` | Can't gain privileges or see home folders, /tmp or devices |
+| `CAP_NET_RAW` only | The one privilege ping monitors need |
+
+### What install.sh does
+
+1. Checks the architecture (arm64/amd64) and takes a Teleporter backup.
+2. Installs `nodejs`, `npm` and `git` from Debian if missing, and checks Node >= 20.4.
+3. Creates the `uptime-kuma` system user and `/var/lib/uptime-kuma` (mode 700).
+4. If `/opt/uptime-kuma` isn't already at `KUMA_VERSION` (pinned, currently 2.5.5):
+   - clones that release into a staging folder and runs `npm ci` and `download-dist`
+     **as `uptime-kuma`**, because npm packages run install scripts;
+   - hands the finished files to root, so the service can't modify its own code;
+   - stops Kuma, backs up its data to `/var/backups/uptime-kuma/<timestamp>/`,
+     keeps the old app in `/opt/uptime-kuma.prev`, and swaps in the new one.
+
+   A failed build leaves the running version untouched.
+5. Installs the systemd unit (backing up a changed one), enables it, and waits for
+   port 3001 to answer.
+
+If `npm ci` fails while compiling `sqlite3`, the prebuilt binary wasn't available.
+Rather than compiling on a 1 GB Pi, check the Uptime Kuma issues for your version.
+
+### Monitors to add
+
+Add these by hand in the web UI (**Add New Monitor**). The domains below are
+placeholders: type your real ones into Kuma, where they stay on the Pi.
+
+| Monitor | Type | Settings | What it tells you |
+|---|---|---|---|
+| Pi-hole DNS | DNS | Hostname `example.com`, resolver `127.0.0.1`, port `53`, record `A` | Whether devices on your network can resolve names (Pi-hole → Unbound → internet) |
+| Unbound | DNS | Hostname `example.com`, resolver `127.0.0.1`, port `5335`, record `A` | Whether Unbound resolves on its own, bypassing Pi-hole |
+| Pi-hole web UI | HTTP(s) | URL `http://127.0.0.1/admin/` (redirects to the login page; Kuma follows it) | The admin UI is being served |
+| Website 1 | HTTP(s) | URL `https://example.com`, tick **Certificate Expiry Notification** | The site is up and returns 2xx; you're warned before its TLS certificate expires |
+| Website 2 | HTTP(s) | URL `https://www.example.org`, same | Same |
+| Website 1 mail (optional) | DNS | Hostname `example.com`, resolver `1.1.1.1`, port `53`, record **`MX`** | The domain still publishes mail servers, so email to it can be delivered |
+| Website 2 mail (optional) | DNS | Hostname `example.org`, same | Same |
+
+Reading the two DNS monitors together (Pi-hole forwards to Unbound):
+
+- **Both down:** look at Unbound or the internet connection first.
+- **Only Pi-hole DNS down:** look at `pihole-FTL`.
+- Pi-hole may keep answering cached names for a while after Unbound fails.
+
+**Certificate expiry:** HTTPS certificates are valid for a limited time (often 90 days)
+and renew automatically, until renewal silently breaks. Kuma checks the certificate on
+every HTTPS check and notifies you as expiry approaches. Set the warning days under
+**Settings → Notifications → TLS Certificate Expiry**.
+
+**MX monitors use a public resolver (`1.1.1.1`) on purpose.** They test what the rest
+of the internet sees for your domain, not your own Pi-hole. A broken MX record, often
+from a DNS change at the registrar, stops incoming email without any website going down.
+For the MX monitor, register the mail domain (usually the bare domain, without `www.`).
+
+### ntfy notifications
+
+Use the same ntfy topic as pi-maintenance, so every alert lands in one place:
+
+1. On the Pi, show the topic on your own screen (it's in the root-only config and
+   must never be committed):
+   ```bash
+   sudo grep '^NTFY_TOPIC=' /etc/pi-maintenance.conf
+   ```
+2. In Kuma, go to **Settings → Notifications → Setup Notification**:
+   - Notification type: **ntfy**
+   - Server URL: `https://ntfy.sh` (or your `NTFY_SERVER`)
+   - Topic: the value from step 1
+   - Tick **Default enabled** and **Apply on all existing monitors**
+3. Click **Test**. A message should arrive in the ntfy app.
+
+The topic is then also stored in Kuma's database in `/var/lib/uptime-kuma` (mode 700,
+owned by `uptime-kuma`), and copied into backups made on upgrade
+(`/var/backups/uptime-kuma`, root-only).
+
+### Upgrade, roll back, remove
+
+- **Upgrade:** set `KUMA_VERSION` in `monitoring/install.sh` to the new
+  [release](https://github.com/louislam/uptime-kuma/releases), read its release notes,
+  and re-run the script.
+- **Roll back** to the previous version:
+  ```bash
+  sudo systemctl stop uptime-kuma
+  sudo mv /opt/uptime-kuma /opt/uptime-kuma.bad && sudo mv /opt/uptime-kuma.prev /opt/uptime-kuma
+  # if the new version changed the database, restore it from the backup:
+  sudo cp -a /var/backups/uptime-kuma/<timestamp>/var/lib/uptime-kuma/. /var/lib/uptime-kuma/
+  sudo systemctl start uptime-kuma
+  ```
+- **Remove:**
+  ```bash
+  sudo systemctl disable --now uptime-kuma
+  sudo rm /etc/systemd/system/uptime-kuma.service && sudo systemctl daemon-reload
+  sudo rm -rf /opt/uptime-kuma /opt/uptime-kuma.prev   # add /var/lib/uptime-kuma to drop the data
+  sudo userdel uptime-kuma
+  sudo ufw status numbered                             # then: sudo ufw delete <n> for the 3001 rules
+  ```
+
 ## Design notes
 
 - **Fail safe, not fail silent.** The first version of this job ran every command
@@ -232,7 +370,7 @@ sudo hardening/verify.sh              # read-only; prints status and OK/FAIL che
 
 | Part | What it does | What it stops |
 |------|--------------|---------------|
-| **ufw** firewall | Denies incoming and routed traffic by default. Allows SSH (22), DNS (53 tcp/udp) and the web UI (80/443) only from `192.168.0.0/24` and `tailscale0`, plus Tailscale's UDP 41641 from anywhere. Allows forwarding from `tailscale0` out of the LAN interface so the Pi still works as an exit node. | Anything outside the LAN/tailnet reaching Pi-hole, SSH or a service you didn't know was listening (e.g. after a router port-forward by mistake). |
+| **ufw** firewall | Denies incoming and routed traffic by default. Allows SSH (22), DNS (53 tcp/udp), the web UI (80/443) and Uptime Kuma (3001) only from `192.168.0.0/24` and `tailscale0`, plus Tailscale's UDP 41641 from anywhere. Allows forwarding from `tailscale0` out of the LAN interface so the Pi still works as an exit node. | Anything outside the LAN/tailnet reaching Pi-hole, SSH or a service you didn't know was listening (e.g. after a router port-forward by mistake). |
 | **fail2ban** | Bans an IP for 1 hour after 5 failed SSH logins in 10 minutes. Never bans loopback, the LAN or the tailnet. | Password guessing. With the firewall on and key-only SSH, this is a second line of defense: it only matters if SSH is ever exposed. |
 | **Key-only SSH** | `/etc/ssh/sshd_config.d/00-hardening.conf`: no passwords, no keyboard-interactive, no root login. | Brute-forced, reused or leaked passwords, and direct root login. |
 

@@ -1,0 +1,50 @@
+# /etc/systemd/system/uptime-kuma.service - installed by monitoring/install.sh.
+#
+# Runs Uptime Kuma as its own unprivileged user, restarts it if it crashes, and
+# caps its memory so a leak can't starve Pi-hole and Unbound on a 1 GB Pi.
+#
+# Logs:  journalctl -u uptime-kuma
+
+[Unit]
+Description=Uptime Kuma monitoring dashboard
+Documentation=https://github.com/louislam/uptime-kuma
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uptime-kuma
+Group=uptime-kuma
+WorkingDirectory=/opt/uptime-kuma
+Environment=NODE_ENV=production
+# Trailing slash as in Kuma's own default (./data/); older releases appended to it.
+Environment=DATA_DIR=/var/lib/uptime-kuma/
+Environment=UPTIME_KUMA_PORT=3001
+# Keep Node's heap below MemoryMax so Node cleans up before systemd steps in.
+Environment=NODE_OPTIONS=--max-old-space-size=200
+ExecStart=/usr/bin/node server/server.js
+Restart=on-failure
+RestartSec=10
+
+# Above MemoryHigh the kernel throttles and reclaims; above MemoryMax it kills
+# the service, which Restart= then brings back.
+MemoryHigh=250M
+MemoryMax=350M
+
+# Sandboxing: the whole filesystem is read-only except the data directory, and
+# the service can't gain privileges. Ping monitors need raw sockets, so that one
+# capability is kept.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/uptime-kuma
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
