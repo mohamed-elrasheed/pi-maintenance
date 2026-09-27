@@ -1,0 +1,24 @@
+# Pi-hole Teleporter exports and other archives (contain Pi-hole config)
+*.zip
+*.tar.gz
+backups/
+
+# Logs
+*.log
+
+# Real config holds the ntfy topic; only the .example is tracked
+pi-maintenance.conf
+*.conf.local
+.env
+
+# SSH keys and other secrets
+id_*
+*.pem
+*.key
+
+# Personal Claude Code settings and notes
+.claude/settings.local.json
+CLAUDE.local.md
+
+# Originals pulled from the Pi, kept locally for reference
+.orig/

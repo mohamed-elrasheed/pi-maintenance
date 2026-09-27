@@ -1,0 +1,9 @@
+# One run a month is roughly 12 entries a year; keep three years of history.
+/var/log/pi-maintenance.log {
+    yearly
+    rotate 3
+    compress
+    missingok
+    notifempty
+    create 0600 root root
+}

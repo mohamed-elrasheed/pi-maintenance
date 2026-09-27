@@ -1,0 +1,19 @@
+# /etc/pi-maintenance.conf - local settings for pi-maintenance.sh.
+# install.sh creates the real file (owner root, mode 600) with a random ntfy topic.
+# The real file is never committed; only this example is.
+
+# Where Teleporter exports are written, and how many to keep.
+BACKUP_DIR=/home/<user>/backups
+KEEP_BACKUPS=6
+
+# Tailscale device that receives a copy of each backup (blank = skip).
+TAILDROP_TARGET=<pc-tailscale-name>
+
+# ntfy alerts. Anyone who knows the topic can read and post to it,
+# so make it long and random, and keep it out of git.
+NTFY_SERVER=https://ntfy.sh
+NTFY_TOPIC=<long-random-topic>
+NTFY_ON_SUCCESS=false
+
+# Upper bound for apt-get and pihole -up (timeout(1) syntax).
+STEP_TIMEOUT=45m

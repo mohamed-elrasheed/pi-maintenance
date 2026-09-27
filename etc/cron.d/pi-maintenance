@@ -1,0 +1,11 @@
+# /etc/cron.d/pi-maintenance - run pi-maintenance.sh at 04:00 on the 1st of each month.
+#
+# cron.d jobs start with PATH=/usr/bin:/bin, which misses /usr/local/bin (pihole)
+# and /usr/sbin (reboot), so set a full PATH here as well as in the script.
+# MAILTO="" because the script logs to /var/log/pi-maintenance.log and alerts via ntfy.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=""
+
+# min hour day-of-month month day-of-week user command
+0 4 1 * * root /usr/local/bin/pi-maintenance.sh
