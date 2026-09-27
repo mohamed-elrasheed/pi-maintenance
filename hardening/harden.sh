@@ -6,8 +6,9 @@
 #    turning off passwords can't lock you out. NAME defaults to $SUDO_USER.
 # 1. Takes a Teleporter backup before changing anything.
 # 2. Installs ufw, fail2ban and python3-systemd if missing.
-# 3. ufw: deny incoming, allow outgoing; SSH, DNS and the web UI only from the
-#    LAN and tailscale0; Tailscale's UDP port; forwarding for the exit node.
+# 3. ufw: deny incoming, allow outgoing; SSH, DNS, the web UI and Uptime Kuma
+#    only from the LAN and tailscale0; Tailscale's UDP port; forwarding for the
+#    exit node.
 #    First enable arms a 5-minute timer that turns ufw off again unless you
 #    confirm a new SSH session works.
 # 4. fail2ban sshd jail (5 failures -> 1 hour ban).
@@ -32,6 +33,7 @@ SERVICES=(
     "53 udp DNS"
     "80 tcp Pi-hole web UI"
     "443 tcp Pi-hole web UI"
+    "3001 tcp Uptime Kuma"
 )
 
 die() { echo "ERROR: $*" >&2; exit 1; }

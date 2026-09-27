@@ -17,6 +17,8 @@ Unattended monthly maintenance for a Raspberry Pi running **Pi-hole v6 + Unbound
   - `/etc/pi-maintenance.conf`: local config incl. ntfy topic and healthchecks.io ping
     URLs. Root-only, **never read it out or commit it**
   - `/var/log/pi-maintenance.log`: run log
+  - Uptime Kuma (source: `monitoring/`): app in `/opt/uptime-kuma`, data in
+    `/var/lib/uptime-kuma`, unit `/etc/systemd/system/uptime-kuma.service`, port 3001
 - `sudo` on the Pi needs a password, so Claude cannot run root commands. Give the user
   the exact command to run instead.
 
