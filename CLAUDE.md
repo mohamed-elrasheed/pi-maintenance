@@ -11,8 +11,11 @@ Unattended monthly maintenance for a Raspberry Pi running **Pi-hole v6 + Unbound
 - Installed files:
   - `/usr/local/bin/pi-maintenance.sh`: the script (source: `bin/pi-maintenance.sh`)
   - `/etc/cron.d/pi-maintenance`: schedule, 04:00 on the 1st (source: `etc/cron.d/`)
+  - `/usr/local/bin/pi-heartbeat.sh` + `/etc/cron.d/pi-heartbeat`: healthchecks.io
+    heartbeat every 5 min (source: `bin/`, `etc/cron.d/`)
   - `/etc/logrotate.d/pi-maintenance`: log rotation (source: `etc/logrotate.d/`)
-  - `/etc/pi-maintenance.conf`: local config incl. ntfy topic. Root-only, **never read it out or commit it**
+  - `/etc/pi-maintenance.conf`: local config incl. ntfy topic and healthchecks.io ping
+    URLs. Root-only, **never read it out or commit it**
   - `/var/log/pi-maintenance.log`: run log
 - `sudo` on the Pi needs a password, so Claude cannot run root commands. Give the user
   the exact command to run instead.

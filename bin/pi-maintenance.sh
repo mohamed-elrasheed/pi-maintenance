@@ -16,6 +16,10 @@
 # Every step's outcome is logged with its exit code. If anything fails, an
 # alert is sent to ntfy at the end of the run.
 #
+# If HC_MAINT_URL is set, the run also reports to healthchecks.io: /start at the
+# beginning, then success or /fail at the end. healthchecks.io alerts if the run
+# fails, never starts, or starts but never finishes.
+#
 # Usage: pi-maintenance.sh               run maintenance (cron does this)
 #        pi-maintenance.sh --test-alert  send a test notification and exit
 
@@ -37,6 +41,8 @@ NTFY_SERVER=https://ntfy.sh
 NTFY_TOPIC=""                 # long random string; treat it like a password
 NTFY_ON_SUCCESS=false         # true = also send a quiet "all good" message
 STEP_TIMEOUT=45m              # upper bound for apt and pihole -up
+HC_MAINT_URL=""               # healthchecks.io ping URL for this job; empty = skip
+HC_SEND_LOG=false             # true = attach the last 20 log lines to /fail pings
 
 FAILED=()
 WARNINGS=()
@@ -57,6 +63,21 @@ notify() {
         -H "Priority: $1" -H "Tags: $2" -H "Title: $3" \
         -d "$4" "$NTFY_SERVER/$NTFY_TOPIC" >/dev/null \
         || { log "WARN  ntfy alert failed (curl exit $?)"; return 1; }
+}
+
+# hc_ping [/start|/fail] [body]: report to the healthchecks.io maintenance check.
+# Quietly does nothing if HC_MAINT_URL is not set. A failed ping is only logged:
+# healthchecks.io already alerts when an expected ping doesn't arrive.
+hc_ping() {
+    [[ -n $HC_MAINT_URL ]] || return 0
+    curl -fsS -m 10 --retry 5 -o /dev/null --data-binary "${2-}" "${HC_MAINT_URL%/}${1-}" \
+        || log "WARN  healthchecks ping ${1:-(success)} failed (curl exit $?)"
+}
+
+# Body for a /fail ping. Log lines can include the hostname, backup paths and
+# apt output, and healthchecks.io is a third party, so this is opt-in.
+hc_log_tail() {
+    [[ $HC_SEND_LOG == true ]] && tail -n 20 "$LOG"
 }
 
 # run_step <name> <command...>: run one step, log the result, record failures.
@@ -141,12 +162,15 @@ summarize() {
         log "=== finished with failures: ${FAILED[*]} ==="
         notify high "warning" "$host maintenance failed" \
             "Failed: ${FAILED[*]}${WARNINGS:+. Warnings: ${WARNINGS[*]}}. See $LOG on $host."
+        hc_ping /fail "$(hc_log_tail)"
     elif (( ${#WARNINGS[@]} )); then
         log "=== finished with warnings ==="
         notify default "information_source" "$host maintenance: warnings" "${WARNINGS[*]}"
+        hc_ping
     else
         log "=== finished OK ==="
         [[ $NTFY_ON_SUCCESS == true ]] && notify low "white_check_mark" "$host maintenance OK" "All steps succeeded."
+        hc_ping
     fi
 }
 
@@ -219,6 +243,7 @@ flock -n 9 || die "another run is already in progress"
 
 trap on_signal INT TERM
 REBOOT=0
+hc_ping /start
 main
 summarize
 

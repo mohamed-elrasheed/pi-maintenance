@@ -2,14 +2,17 @@
 # verify.sh - show the Pi's hardening state. Read-only; changes nothing.
 # Run from a checkout of this repo on the Pi:  sudo hardening/verify.sh
 #
-# Prints ufw status, the fail2ban sshd jail and the effective sshd settings,
-# then a summary of OK/FAIL checks. Exits 1 if any check failed.
+# Prints ufw status, the fail2ban sshd jail, the effective sshd settings and the
+# healthchecks.io dead-man switch, then a summary of OK/FAIL checks. Exits 1 if
+# any check failed. Never prints the ping URLs themselves.
 
 set -uo pipefail   # no -e: keep going and report everything
 
 [[ $EUID -eq 0 ]] || { echo "Run with sudo: sudo ./verify.sh" >&2; exit 1; }
 
 ROLLBACK=pi-hardening-ufw-rollback
+CONF=/etc/pi-maintenance.conf
+HB_STATUS=/run/pi-heartbeat.status
 failures=0
 
 section() { printf '\n==> %s\n' "$*"; }
@@ -27,6 +30,12 @@ check() {
 
 has_line() { grep -qx "$1" <<<"$2"; }
 
+# conf_has KEY: KEY has a non-empty value in $CONF. Greps rather than sources,
+# so nothing in the config is executed or printed.
+conf_has() { grep -Eq "^$1=[\"']?[^\"' ]" "$CONF" 2>/dev/null; }
+
+heartbeat_recent() { [[ -n $(find "$HB_STATUS" -mmin -10 2>/dev/null) ]]; }
+
 section "ufw status"
 ufw_status=$(ufw status verbose 2>&1)
 echo "$ufw_status"
@@ -42,6 +51,12 @@ grep -E '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin|p
 section "IP forwarding (the exit node needs 1)"
 sysctl net.ipv4.ip_forward net.ipv6.conf.all.forwarding
 
+section "Dead-man switch (healthchecks.io)"
+for key in HC_HEARTBEAT_URL HC_MAINT_URL; do
+    if conf_has "$key"; then echo "$key is set"; else echo "$key is not set (pings skipped)"; fi
+done
+echo "Last heartbeat: $(cat "$HB_STATUS" 2>/dev/null || echo 'none since boot')"
+
 section "Summary"
 check "ufw is active"                       has_line "Status: active" "$ufw_status"
 check "ufw denies incoming by default"      grep -q "Default: deny (incoming)" <<<"$ufw_status"
@@ -54,6 +69,18 @@ check "root login is off"                   has_line "permitrootlogin no" "$sshd
 check "key login is on"                     has_line "pubkeyauthentication yes" "$sshd_T"
 check "IPv4 forwarding is on"               has_line "1" "$(sysctl -n net.ipv4.ip_forward)"
 check "IPv6 forwarding is on"               has_line "1" "$(sysctl -n net.ipv6.conf.all.forwarding)"
+check "heartbeat cron job is installed"     test -f /etc/cron.d/pi-heartbeat
+if conf_has HC_HEARTBEAT_URL; then
+    check "last heartbeat succeeded"        grep -q '^OK' "$HB_STATUS"
+    check "last heartbeat is < 10 min old"  heartbeat_recent
+else
+    echo "SKIP  heartbeat checks (HC_HEARTBEAT_URL not set)"
+fi
+if conf_has HC_MAINT_URL; then
+    echo "OK    maintenance check URL is set"
+else
+    echo "SKIP  maintenance pings (HC_MAINT_URL not set)"
+fi
 
 if ((failures)); then
     echo "$failures check(s) failed."
