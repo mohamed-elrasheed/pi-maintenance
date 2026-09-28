@@ -22,3 +22,6 @@ CLAUDE.local.md
 
 # Originals pulled from the Pi, kept locally for reference
 .orig/
+
+# Python bytecode (from testing the ntfy handler locally)
+__pycache__/

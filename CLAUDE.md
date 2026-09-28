@@ -19,6 +19,10 @@ Unattended monthly maintenance for a Raspberry Pi running **Pi-hole v6 + Unbound
   - `/var/log/pi-maintenance.log`: run log
   - Uptime Kuma (source: `monitoring/`): app in `/opt/uptime-kuma`, data in
     `/var/lib/uptime-kuma`, unit `/etc/systemd/system/uptime-kuma.service`, port 3001
+  - OpenCanary honeypot (source: `canary/`): venv in `/opt/opencanary`, config in
+    `/etc/opencanaryd/`, ntfy handler in `/usr/local/lib/opencanary-ntfy`, state in
+    `/var/lib/opencanary`, unit `/etc/systemd/system/opencanary.service`, fake ports
+    21/23/2222/3306/8080. `/etc/opencanaryd/ntfy-url` holds the topic: never read it out
 - `sudo` on the Pi needs a password, so Claude cannot run root commands. Give the user
   the exact command to run instead.
 

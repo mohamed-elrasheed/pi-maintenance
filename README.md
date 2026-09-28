@@ -6,7 +6,9 @@ services are still running, and reboots only when everything went well. If any s
 it pushes an alert to your phone through [ntfy](https://ntfy.sh). A
 [healthchecks.io](https://healthchecks.io) dead-man switch covers the failures the Pi
 can't report itself: it's off, offline, or the job never ran. Optionally,
-[Uptime Kuma](#monitoring) watches DNS, the web UI and your websites from the Pi.
+[Uptime Kuma](#monitoring) watches DNS, the web UI and your websites from the Pi,
+and an [OpenCanary honeypot](#honeypot) alerts you when something on your network
+probes the Pi.
 
 Built for a home network where the Pi is the DNS server for every device, so a
 bad upgrade that goes unnoticed means the whole house loses the internet.
@@ -60,9 +62,14 @@ flowchart LR
 │   ├── harden.sh                     # applies it (see Hardening below)
 │   ├── verify.sh                     # read-only status check
 │   └── etc/                          # sshd drop-in and fail2ban jail
-└── monitoring/                       # optional: Uptime Kuma dashboard
-    ├── install.sh                    # install/upgrade (see Monitoring below)
-    └── uptime-kuma.service           # systemd unit      -> /etc/systemd/system/
+├── monitoring/                       # optional: Uptime Kuma dashboard
+│   ├── install.sh                    # install/upgrade (see Monitoring below)
+│   └── uptime-kuma.service           # systemd unit      -> /etc/systemd/system/
+└── canary/                           # optional: OpenCanary honeypot
+    ├── install.sh                    # install/upgrade (see Honeypot below)
+    ├── opencanary.conf               # fake services     -> /etc/opencanaryd/
+    ├── opencanary.service            # systemd unit      -> /etc/systemd/system/
+    └── pi_canary_ntfy.py             # ntfy alerts       -> /usr/local/lib/opencanary-ntfy/
 ```
 
 ## Setup
@@ -319,6 +326,209 @@ owned by `uptime-kuma`), and copied into backups made on upgrade
   sudo ufw status numbered                             # then: sudo ufw delete <n> for the 3001 rules
   ```
 
+## Honeypot
+
+[OpenCanary](https://github.com/thinkst/opencanary) runs fake network services on the
+Pi (FTP, Telnet, MySQL, an HTTP login page and SSH) and sends an ntfy alert the moment
+anything touches one of them.
+
+```bash
+sudo canary/install.sh         # install, or upgrade after changing OC_VERSION
+sudo hardening/harden.sh       # re-run once, to open the honeypot ports to the LAN and tailnet
+sudo hardening/verify.sh       # includes the honeypot checks
+```
+
+### How it works
+
+- **Honeypot.** A service with no real users. Nobody has a reason to log in to FTP
+  on your DNS server, so *any* connection is worth knowing about.
+- **Deception.** You can't block every attack, so you put convincing bait where an
+  intruder will look: an old OpenSSH banner, a NAS login page, a MySQL server. An
+  attacker inside your network (a compromised laptop, a hijacked smart plug, a stolen
+  Tailscale key) doesn't know what's real and has to explore, and exploring trips the
+  wire. The rest of this repo protects the Pi. The honeypot tells you something is
+  *already inside* your network.
+- **Why false positives are near zero.** An intrusion detection system judges whether
+  traffic *looks* malicious, and every misjudgment is a false alarm. A honeypot doesn't
+  judge: nothing legitimate should connect at all, so each alert is either an attacker
+  or something you can name. The usual culprits are your own nmap, a "network scanner"
+  phone app (Fing and similar), a router's device discovery, or a monitor pointed at
+  the wrong port. Name them once in `ip.ignorelist` ([below](#silence-known-scanners))
+  and the channel stays silent until something real happens. Don't add Uptime Kuma
+  monitors for these ports.
+- **What it can't see.** Attackers who never touch the Pi, and anything that happens
+  on a single host. It's a tripwire, not antivirus.
+
+### MITRE ATT&CK techniques it detects
+
+[ATT&CK](https://attack.mitre.org/) is a public catalog of what attackers do once
+they're in. These are the techniques that tend to hit a honeypot:
+
+| Technique | What the attacker does | What trips |
+|---|---|---|
+| [T1046](https://attack.mitre.org/techniques/T1046/) Network Service Discovery | Scans the network to see what's running | Any connection to a fake port; nmap's `-sV` probes |
+| [T1110.001](https://attack.mitre.org/techniques/T1110/001/) Brute Force: Password Guessing | Tries many passwords on one account | Login attempts on FTP, Telnet, SSH, MySQL, HTTP |
+| [T1110.003](https://attack.mitre.org/techniques/T1110/003/) Brute Force: Password Spraying | Tries one common password on many accounts or services | Same, across services (several alerts from one IP) |
+| [T1078](https://attack.mitre.org/techniques/T1078/) Valid Accounts | Tries credentials stolen from elsewhere | Any login attempt: no real account exists here |
+| [T1021.004](https://attack.mitre.org/techniques/T1021/004/) Remote Services: SSH | Moves to the next machine over SSH | Connections and logins on SSH 2222 |
+
+### Fake services
+
+| Port | Service | Pretends to be | Alerts on |
+|---|---|---|---|
+| 21 | FTP | Generic FTP server | Start of a login, login attempt |
+| 23 | Telnet | Cisco-style login prompt | Connection, login attempt |
+| 2222 | SSH | OpenSSH 5.1 on Debian (old, so attractive) | Connection, client version, login attempt |
+| 3306 | MySQL | MySQL 5.5 on Ubuntu | Connection, login attempt |
+| 8080 | HTTP | A NAS login page | Page request, login attempt |
+
+The real SSH stays on 22. The portscan module is **off**: it needs `iptables-legacy`
+and inserts its own firewall rules, which conflicts with ufw's nftables backend on
+Debian trixie, and it reads `/var/log/kern.log`, which trixie doesn't write by default.
+Connections to the fake services still catch scans that look at what's running.
+
+### Alerts
+
+Every event goes to the same ntfy topic as pi-maintenance:
+
+> **Honeypot: Telnet (23) touched**
+> From: 192.168.0.23
+> Service: Telnet on port 23
+> Event: connection
+
+- **Repeats are collapsed.** The first event from an IP on a service alerts at once.
+  Further events from that IP on that service within 60 s are counted and sent as one
+  "touched again" alert with the count, so a brute-force run doesn't flood your phone
+  or hit ntfy.sh's rate limit. A different IP or service always alerts at once.
+- **Alerts never carry usernames, passwords or anything else the attacker typed**,
+  because ntfy.sh is a third party. The full events, including tried credentials, are
+  in the journal on the Pi:
+  ```bash
+  sudo journalctl -u opencanary -o cat
+  ```
+- **The topic never touches the repo or the OpenCanary config.** `install.sh` reads
+  `NTFY_SERVER` and `NTFY_TOPIC` from `/etc/pi-maintenance.conf` (with grep, without
+  running it) and writes the URL to `/etc/opencanaryd/ntfy-url` (root, 600). systemd's
+  `LoadCredential=` hands a copy to this service only. **Re-run `install.sh` after
+  changing the topic.**
+- Alerts are sent from a background thread with a 10 s timeout, so a slow ntfy server
+  never stalls the honeypot. Send failures are logged (`HTTP 429`, never the URL).
+
+### Why a venv and not Docker
+
+- **Firewall.** Ports published by Docker skip ufw, as explained under
+  [Uptime Kuma](#why-native-node-and-not-docker). A honeypot exposed to the internet
+  would alert on every scanner out there and turn your phone into a pager.
+- **RAM.** OpenCanary itself needs roughly 40–70 MB; Docker's daemons alone would
+  cost more. `install.sh` refuses to install when less than 150 MB is available.
+- **Upgrades.** The venv is pinned (`OC_VERSION`, currently 0.9.10) and built as the
+  `opencanary` user, since pip runs package build scripts.
+
+### Sandboxing
+
+The honeypot talks to attackers by design, so it's locked down harder than Uptime Kuma:
+
+| Setting | Why |
+|---|---|
+| `User=opencanary`, never root | The docs start it as root and drop privileges later. Here it never has them |
+| `CAP_NET_BIND_SERVICE` only | The one privilege it needs, for ports 21 and 23 |
+| `MemoryHigh=96M`, `MemoryMax=128M`, `TasksMax=32` | A connection flood gets throttled and restarted, instead of starving DNS |
+| `ProtectSystem=strict`, `StateDirectory=opencanary` | Read-only everywhere except `/var/lib/opencanary` |
+| `NoNewPrivileges`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, `ProtectProc=invisible` | Can't gain privileges or see home folders, /tmp, devices or other processes |
+| `RestrictAddressFamilies`, `SystemCallFilter=@system-service`, `RestrictNamespaces`, ... | An exploited honeypot has little of the kernel to attack |
+
+The fake SSH host keys are kept in `/var/lib/opencanary` so they don't change on every
+restart; a host key that keeps changing gives the honeypot away.
+
+### What install.sh does
+
+1. Checks the architecture and that at least 150 MB of memory is available, reads the
+   ntfy settings, and takes a Teleporter backup.
+2. Installs `python3-venv` from Debian if missing, and checks Python >= 3.10.
+3. Creates the `opencanary` system user and `/var/lib/opencanary` (mode 700).
+4. If `/opt/opencanary` isn't already at `OC_VERSION`: builds the venv in a staging
+   folder **as `opencanary`**, hands the files to root so the service can't modify its
+   own code, and swaps it in, keeping the old one as `/opt/opencanary.prev`. A failed
+   build leaves the running version untouched.
+5. Installs the config, handler, credential and unit (copying any file it replaces to
+   `/var/backups/opencanary/<timestamp>/`). If the service isn't running yet, it checks
+   that ports 21, 23, 2222, 3306 and 8080 are free. Then it starts OpenCanary and waits
+   until all five are listening.
+
+If `pip install` fails while compiling a package, a prebuilt wheel wasn't available.
+`sudo apt install python3-dev gcc` and re-running usually fixes it.
+
+### Test it
+
+From your laptop, on the LAN or the tailnet, with the ntfy app open on your phone.
+Install [nmap](https://nmap.org/download) first; Windows already ships `curl`.
+
+1. Scan your own Pi:
+   ```bash
+   nmap -sV -p 21,23,2222,3306,8080 <pi-address>
+   ```
+   Expected: all five ports `open`, with fake versions such as `OpenSSH 5.1p1 Debian`
+   on 2222 and `MySQL 5.5.43` on 3306. Within seconds your phone gets one
+   **Honeypot: … touched** alert per service nmap talked to (usually SSH, Telnet,
+   MySQL and HTTP), each showing your laptop's IP.
+2. Try a login on FTP, which nmap doesn't always do:
+   ```bash
+   curl ftp://test:test@<pi-address>/
+   ```
+   Expected: curl reports that the login was denied, and a
+   **Honeypot: FTP (21) touched** alert arrives.
+3. Open `http://<pi-address>:8080` in a browser and log in with anything.
+   Expected: the login fails. If this is within 60 s of step 1, the HTTP events are
+   collapsed: about a minute after step 1 a **Honeypot: HTTP (8080) touched again**
+   alert arrives with a count.
+4. On the Pi, check the full record (it includes the username and password you tried)
+   and the checks:
+   ```bash
+   sudo journalctl -u opencanary --since -10min -o cat
+   sudo hardening/verify.sh
+   ```
+
+No alert? Check that `verify.sh` passes, that the phone is subscribed to the topic
+(`sudo pi-maintenance.sh --test-alert`), and look for send errors with
+`sudo journalctl -u opencanary | grep pi_canary_ntfy`.
+
+**Scanning from outside** your LAN and tailnet should show the ports as `filtered` and
+send no alert. That's the firewall doing its job: this honeypot watches the inside.
+
+### Silence known scanners
+
+Only for devices that scan on a schedule (a router's device discovery, a network
+inventory app). Don't add your laptop just because you tested from it: if it's ever
+compromised, that's exactly the alert you want. Edit `canary/opencanary.conf`:
+
+```json
+"ip.ignorelist": [ "192.168.0.50" ],
+```
+
+then re-run `sudo canary/install.sh`. CIDR ranges work too (`"192.168.0.0/28"`).
+Ignored events are dropped completely, including from the journal.
+
+### Upgrade, roll back, remove
+
+- **Upgrade:** set `OC_VERSION` in `canary/install.sh` to the new
+  [release](https://pypi.org/project/opencanary/#history), read the changes, and re-run it.
+- **Roll back** to the previous version:
+  ```bash
+  sudo systemctl stop opencanary
+  sudo mv /opt/opencanary /opt/opencanary.bad && sudo mv /opt/opencanary.prev /opt/opencanary
+  sudo systemctl start opencanary
+  ```
+- **Remove:**
+  ```bash
+  sudo systemctl disable --now opencanary
+  sudo rm /etc/systemd/system/opencanary.service && sudo systemctl daemon-reload
+  sudo rm -rf /opt/opencanary /opt/opencanary.prev /etc/opencanaryd /usr/local/lib/opencanary-ntfy /var/lib/opencanary
+  sudo userdel opencanary
+  sudo ufw status numbered      # then: sudo ufw delete <n> for the 21/23/2222/3306/8080 rules
+  ```
+  Also remove the five "Honeypot" lines from `SERVICES` in `hardening/harden.sh`, or
+  the next run adds the rules back.
+
 ## Design notes
 
 - **Fail safe, not fail silent.** The first version of this job ran every command
@@ -365,12 +575,12 @@ optional.
 sudo hardening/harden.sh              # account to check defaults to the one you sudo from
 sudo hardening/harden.sh --user <user>
 sudo hardening/verify.sh              # read-only; prints status and OK/FAIL checks,
-                                      # including the dead-man switch
+                                      # including the dead-man switch and honeypot
 ```
 
 | Part | What it does | What it stops |
 |------|--------------|---------------|
-| **ufw** firewall | Denies incoming and routed traffic by default. Allows SSH (22), DNS (53 tcp/udp), the web UI (80/443) and Uptime Kuma (3001) only from `192.168.0.0/24` and `tailscale0`, plus Tailscale's UDP 41641 from anywhere. Allows forwarding from `tailscale0` out of the LAN interface so the Pi still works as an exit node. | Anything outside the LAN/tailnet reaching Pi-hole, SSH or a service you didn't know was listening (e.g. after a router port-forward by mistake). |
+| **ufw** firewall | Denies incoming and routed traffic by default. Allows SSH (22), DNS (53 tcp/udp), the web UI (80/443), Uptime Kuma (3001) and the honeypot (21, 23, 2222, 3306, 8080) only from `192.168.0.0/24` and `tailscale0`, plus Tailscale's UDP 41641 from anywhere. Allows forwarding from `tailscale0` out of the LAN interface so the Pi still works as an exit node. | Anything outside the LAN/tailnet reaching Pi-hole, SSH or a service you didn't know was listening (e.g. after a router port-forward by mistake). |
 | **fail2ban** | Bans an IP for 1 hour after 5 failed SSH logins in 10 minutes. Never bans loopback, the LAN or the tailnet. | Password guessing. With the firewall on and key-only SSH, this is a second line of defense: it only matters if SSH is ever exposed. |
 | **Key-only SSH** | `/etc/ssh/sshd_config.d/00-hardening.conf`: no passwords, no keyboard-interactive, no root login. | Brute-forced, reused or leaked passwords, and direct root login. |
 
