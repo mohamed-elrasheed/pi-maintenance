@@ -88,7 +88,10 @@ if [[ -n $(conf_get HC_MAINT_URL) ]] && ! grep -q '^HC_SEND_LOG=' "$CONF"; then
 fi
 
 echo "==> Installing files"
-bash -n bin/pi-maintenance.sh bin/pi-heartbeat.sh
+# One file per bash -n: extra arguments are passed to the script, not checked.
+for f in bin/pi-maintenance.sh bin/pi-heartbeat.sh; do bash -n "$f"; done
+command -v dig >/dev/null \
+    || echo "    WARNING: dig not found; the heartbeat will report /fail until you run: apt install bind9-dnsutils" >&2
 install -o root -g root -m 755 bin/pi-maintenance.sh /usr/local/bin/pi-maintenance.sh
 install -o root -g root -m 755 bin/pi-heartbeat.sh /usr/local/bin/pi-heartbeat.sh
 install -o root -g root -m 644 etc/cron.d/pi-maintenance /etc/cron.d/pi-maintenance

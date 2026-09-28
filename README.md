@@ -45,7 +45,8 @@ flowchart LR
     script --> log[("/var/log/pi-maintenance.log")]
     script -- "on failure" --> ntfy["ntfy topic"] --> phone["Phone"]
     script -- "/start, success, /fail" --> hc["healthchecks.io"]
-    hbcron["cron<br/>every 5 min"] --> hb["pi-heartbeat.sh"] -- ping --> hc
+    hbcron["cron<br/>every 5 min"] --> hb["pi-heartbeat.sh"] -- "ping or /fail" --> hc
+    hb -- "random name" --> dns["Pi-hole → Unbound"]
     hc -- "late or /fail" --> phone
 ```
 
@@ -169,7 +170,7 @@ Two checks:
 
 | Check | Pinged by | What it catches | Suggested settings |
 |-------|-----------|-----------------|--------------------|
-| **Heartbeat** | `pi-heartbeat.sh`, every 5 min from `/etc/cron.d/pi-heartbeat` | Pi off, frozen or offline; cron not running. If the Pi resolves DNS through its own Pi-hole, a broken DNS stack too | Simple, period 5 min, grace 10 min |
+| **Heartbeat** | `pi-heartbeat.sh`, every 5 min from `/etc/cron.d/pi-heartbeat` | Pi off, frozen or offline; cron not running; Pi-hole or Unbound not resolving (sends `/fail`, see below) | Simple, period 5 min, grace 10 min |
 | **Maintenance** | `pi-maintenance.sh`: `/start` when it begins, then success or `/fail` | A failed run; a run that never started; a run that started and never finished (hung, or the Pi didn't come back from the reboot) | Cron `0 4 1 * *` in the Pi's time zone, grace 3 hours (the upgrade steps can each take up to `STEP_TIMEOUT`) |
 
 Setup:
@@ -183,9 +184,40 @@ Setup:
    until the first run. Run `sudo pi-maintenance.sh` by hand to arm it now.
 
 If a URL is blank, that part is skipped silently. Curl uses `-m 10 --retry 5`, so one
-flaky request doesn't cause a false alarm, and a heartbeat always finishes long before
-the next one. `sudo hardening/verify.sh` shows whether each URL is set (never the URL
-itself) and the result of the last heartbeat.
+flaky request doesn't cause a false alarm, and a heartbeat (DNS check included) always
+finishes long before the next one. `sudo hardening/verify.sh` shows whether each URL is
+set (never the URL itself) and the result of the last heartbeat.
+
+**The heartbeat checks DNS first.** A Pi that is on but can't resolve names takes the
+whole house offline, so before each ping `pi-heartbeat.sh` asks Pi-hole
+(`127.0.0.1:53`) for a made-up name like `hb-3f9a1c07b2e4.example.com`, with a new random
+label every run. Pi-hole caches answers and keeps serving them after Unbound dies, so a
+fixed name would keep "working" through an outage. A name nobody has asked for before
+isn't in the cache, so Pi-hole has to forward it to Unbound.
+
+| Pi-hole answers | Meaning | Heartbeat sends |
+|-----------------|---------|-----------------|
+| `NOERROR` or `NXDOMAIN` | A resolver answered. `NXDOMAIN` ("no such name") is the normal answer for a made-up name | the normal ping |
+| `SERVFAIL` or `REFUSED` | Pi-hole is up but couldn't get an answer, typically because Unbound is down or can't recurse | `/fail` |
+| nothing within 3 s, after 1 retry | Pi-hole is down or hung | `/fail` |
+
+`/fail` makes healthchecks.io alert right away instead of waiting out the grace period,
+and the ping body (shown in the check's event log) says what Pi-hole answered. The
+result also goes to `/run/pi-heartbeat.status`.
+
+Notes:
+
+- **Needs `dig`**, from the `bind9-dnsutils` package. `install.sh` warns if it's
+  missing, and the heartbeat reports `/fail` until it's installed, because it can't
+  prove DNS works without it.
+- **A `/fail` needs DNS too**, to look up `hc-ping.com`. If the Pi resolves through its
+  own Pi-hole, that usually still works for a while, because `hc-ping.com` is in
+  Pi-hole's cache. If it doesn't, the ping can't go out and you get the normal
+  late-heartbeat alert after the grace period.
+- **It proves the resolver answers, not that the internet is reachable.** Unbound can
+  answer some made-up names from its own cache (`example.com` is DNSSEC-signed, so
+  Unbound can prove a name doesn't exist without asking again). Losing the internet is
+  still caught: the ping itself can't get out.
 
 **Log lines on failure (opt-in).** With `HC_SEND_LOG=true`, a `/fail` ping carries the last
 20 lines of the log, so the context is right there in healthchecks.io. Those lines can

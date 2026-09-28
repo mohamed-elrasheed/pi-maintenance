@@ -3,9 +3,9 @@
 # Run from a checkout of this repo on the Pi:  sudo hardening/verify.sh
 #
 # Prints ufw status, the fail2ban sshd jail, the effective sshd settings, the
-# healthchecks.io dead-man switch and the OpenCanary honeypot, then a summary of
-# OK/FAIL checks. Exits 1 if any check failed. Never prints the ping URLs or the
-# ntfy topic.
+# healthchecks.io dead-man switch (including its DNS check) and the OpenCanary
+# honeypot, then a summary of OK/FAIL checks. Exits 1 if any check failed. Never
+# prints the ping URLs or the ntfy topic.
 
 set -uo pipefail   # no -e: keep going and report everything
 
@@ -93,7 +93,9 @@ check "IPv4 forwarding is on"               has_line "1" "$(sysctl -n net.ipv4.i
 check "IPv6 forwarding is on"               has_line "1" "$(sysctl -n net.ipv6.conf.all.forwarding)"
 check "heartbeat cron job is installed"     test -f /etc/cron.d/pi-heartbeat
 if conf_has HC_HEARTBEAT_URL; then
+    check "dig is installed (heartbeat DNS check)" command -v dig
     check "last heartbeat succeeded"        grep -q '^OK' "$HB_STATUS"
+    check "last heartbeat: DNS resolved"    grep -Eq 'dns (NOERROR|NXDOMAIN) for ' "$HB_STATUS"
     check "last heartbeat is < 10 min old"  heartbeat_recent
 else
     echo "SKIP  heartbeat checks (HC_HEARTBEAT_URL not set)"
