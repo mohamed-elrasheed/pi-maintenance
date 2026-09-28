@@ -594,6 +594,9 @@ Ignored events are dropped completely, including from the journal.
   keeping existing config files during upgrades, the post-upgrade service check, and
   skipping reboot on failure.
 - **Remote access** is key-based SSH over Tailscale. No ports are exposed to the internet.
+- **The [subnet router](#subnet-router) opens the whole LAN to the tailnet**, not just the
+  Pi. Fine for a tailnet with only your devices; if you share it, limit who can reach
+  `192.168.0.0/24` with Tailscale access controls.
 - The repo uses placeholders (`<user>`, `<pc>`, `<pi-tailscale-ip>`) instead of real
   hostnames, IPs or usernames.
 
@@ -651,6 +654,54 @@ sudo ufw disable
 sudo rm /etc/fail2ban/jail.d/sshd.local && sudo systemctl restart fail2ban
 sudo rm /etc/ssh/sshd_config.d/00-hardening.conf && sudo systemctl reload ssh
 ```
+
+## Subnet router
+
+The Pi is also a Tailscale [subnet router](https://tailscale.com/kb/1019/subnets) for
+the home LAN, `192.168.0.0/24`. Your devices on the tailnet can then reach things at
+home that can't run Tailscale (the router's admin page, a printer, a NAS) at their normal
+`192.168.0.x` address from anywhere. The traffic goes through the Pi: into it over the
+encrypted tunnel, then out onto the LAN.
+
+LAN devices need no changes. By default Tailscale rewrites the source address
+(SNAT), so to them the traffic comes from the Pi's LAN address, and replies go back
+to the Pi without any extra route on your router.
+
+Setup, once:
+
+1. **Forwarding.** The Pi has to pass packets between `tailscale0` and the LAN. That is
+   the same forwarding the exit node uses: `harden.sh` already allows routing from
+   `tailscale0` out of the LAN interface, and `verify.sh` checks that IP forwarding is
+   on.
+2. **Advertise the route** on the Pi:
+
+   ```bash
+   sudo tailscale set --advertise-routes=192.168.0.0/24
+   ```
+
+   Use `tailscale set`, not `tailscale up`. `set` changes only the settings you name.
+   `up` wants every setting you already use (like `--advertise-exit-node`) repeated, and
+   with `--reset` it silently drops the ones you leave out.
+3. **Approve it in the admin console.** An advertised route does nothing until an admin
+   approves it, so a compromised device can't claim to be a route to your LAN on its own.
+   In the [Machines](https://login.tailscale.com/admin/machines) page, open the Pi's
+   **⋯** menu → **Edit route settings**, tick `192.168.0.0/24` and save. The Pi then shows
+   a **Subnets** badge.
+4. **Turn it on for each client.** Clients ignore subnet routes until you opt in:
+   **Use Tailscale subnets** in the Tailscale menu on Windows and macOS, or in the app
+   settings on iOS and Android. On Linux, `sudo tailscale set --accept-routes`.
+
+Test from a device away from home, for example on mobile data: open your router's
+admin page by its `192.168.0.x` address.
+
+**Tip: turn "Use Tailscale subnets" off at home.** On the home network the device can
+already reach `192.168.0.0/24` directly. With the option on, it may send that traffic
+through the tunnel to the Pi instead, which is slower. If the Pi is down, you'd also
+lose the rest of the LAN, not just DNS. Turn it on when you leave the house, and leave it
+off on devices that never leave.
+
+Undo: `sudo tailscale set --advertise-routes=` (empty) on the Pi, then remove the
+route in the admin console.
 
 ## License
 
