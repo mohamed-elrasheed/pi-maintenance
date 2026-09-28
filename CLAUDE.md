@@ -39,5 +39,7 @@ Unattended monthly maintenance for a Raspberry Pi running **Pi-hole v6 + Unbound
 
 ## Working on the repo
 
-- Syntax-check with `bash -n bin/pi-maintenance.sh install.sh` (and `shellcheck` if available).
+- Syntax-check every script, one at a time (`bash -n a.sh b.sh` only checks `a.sh`;
+  the rest become its arguments), then `shellcheck` if available:
+  `for f in $(git ls-files '*.sh'); do bash -n "$f" || echo "FAIL $f"; done`
 - Deploy = user copies the repo to the Pi and runs `sudo ./install.sh`.

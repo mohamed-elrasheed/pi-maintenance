@@ -29,9 +29,11 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # a copy only to this service under $CREDENTIALS_DIRECTORY. Not in the
 # environment, not in the config.
 LoadCredential=ntfy-url:/etc/opencanaryd/ntfy-url
-# "python -m twisted" is twistd. Called this way because install.sh builds the
-# venv elsewhere and moves it, which leaves stale paths in bin/twistd's shebang.
-ExecStart=/opt/opencanary/bin/python -m twisted --nodaemon --pidfile= --logfile=- --python=/opt/opencanary/bin/opencanary.tac
+# This is twistd, called through the venv's python because install.sh builds
+# the venv elsewhere and moves it, which leaves stale paths in bin/twistd's
+# shebang. Not "python -m twisted": that runs the newer "twist" runner, which
+# rejects these flags. twistd.py has no __main__ guard, so -m can't reach it.
+ExecStart=/opt/opencanary/bin/python -c "from twisted.scripts.twistd import run; run()" --nodaemon --pidfile= --logfile=- --python=/opt/opencanary/bin/opencanary.tac
 Restart=on-failure
 RestartSec=10
 
