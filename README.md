@@ -234,7 +234,7 @@ extra daemon, and it adds memory limits and sandboxing:
 | `NoNewPrivileges`, `ProtectHome`, `PrivateTmp`, `PrivateDevices` | Can't gain privileges or see home folders, /tmp or devices |
 | `CAP_NET_RAW` only | The one privilege ping monitors need |
 
-### What install.sh does
+### What monitoring/install.sh does
 
 1. Checks the architecture (arm64/amd64) and takes a Teleporter backup.
 2. Installs `nodejs`, `npm` and `git` from Debian if missing, and checks Node >= 20.4.
@@ -304,7 +304,7 @@ The topic is then also stored in Kuma's database in `/var/lib/uptime-kuma` (mode
 owned by `uptime-kuma`), and copied into backups made on upgrade
 (`/var/backups/uptime-kuma`, root-only).
 
-### Upgrade, roll back, remove
+### Upgrade, roll back, remove Uptime Kuma
 
 - **Upgrade:** set `KUMA_VERSION` in `monitoring/install.sh` to the new
   [release](https://github.com/louislam/uptime-kuma/releases), read its release notes,
@@ -440,7 +440,7 @@ The honeypot talks to attackers by design, so it's locked down harder than Uptim
 The fake SSH host keys are kept in `/var/lib/opencanary` so they don't change on every
 restart; a host key that keeps changing gives the honeypot away.
 
-### What install.sh does
+### What canary/install.sh does
 
 1. Checks the architecture and that at least 150 MB of memory is available, reads the
    ntfy settings, and takes a Teleporter backup.
@@ -508,7 +508,7 @@ compromised, that's exactly the alert you want. Edit `canary/opencanary.conf`:
 then re-run `sudo canary/install.sh`. CIDR ranges work too (`"192.168.0.0/28"`).
 Ignored events are dropped completely, including from the journal.
 
-### Upgrade, roll back, remove
+### Upgrade, roll back, remove OpenCanary
 
 - **Upgrade:** set `OC_VERSION` in `canary/install.sh` to the new
   [release](https://pypi.org/project/opencanary/#history), read the changes, and re-run it.
