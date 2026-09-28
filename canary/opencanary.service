@@ -1,0 +1,75 @@
+# /etc/systemd/system/opencanary.service - installed by canary/install.sh.
+#
+# Runs the OpenCanary honeypot as its own unprivileged user. It never runs as
+# root: CAP_NET_BIND_SERVICE is the one privilege it gets, so it can listen on
+# FTP (21) and Telnet (23). This process talks to attackers by design, so it is
+# sandboxed more tightly than uptime-kuma.service.
+#
+# Logs (every event, in full):  journalctl -u opencanary
+
+[Unit]
+Description=OpenCanary honeypot
+Documentation=https://opencanary.readthedocs.io/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opencanary
+Group=opencanary
+# Config is read from /etc/opencanaryd/opencanary.conf; the SSH host keys are
+# kept here so they don't change on restart (a new key every time is a tell).
+StateDirectory=opencanary
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/opencanary
+Environment=HOME=/var/lib/opencanary
+Environment=PYTHONPATH=/usr/local/lib/opencanary-ntfy
+Environment=PYTHONDONTWRITEBYTECODE=1
+# The ntfy URL (holds the topic). systemd reads the root-only file and exposes
+# a copy only to this service under $CREDENTIALS_DIRECTORY. Not in the
+# environment, not in the config.
+LoadCredential=ntfy-url:/etc/opencanaryd/ntfy-url
+# This is twistd, called through the venv's python because install.sh builds
+# the venv elsewhere and moves it, which leaves stale paths in bin/twistd's
+# shebang. Not "python -m twisted": that runs the newer "twist" runner, which
+# rejects these flags. twistd.py has no __main__ guard, so -m can't reach it.
+ExecStart=/opt/opencanary/bin/python -c "from twisted.scripts.twistd import run; run()" --nodaemon --pidfile= --logfile=- --python=/opt/opencanary/bin/opencanary.tac
+Restart=on-failure
+RestartSec=10
+
+# A flood of connections gets throttled, then killed and restarted, instead of
+# starving Pi-hole and Unbound.
+MemoryHigh=96M
+MemoryMax=128M
+TasksMax=32
+
+# Privileges: only binding ports below 1024; can never gain more.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+# Filesystem: read-only everywhere except its state directory.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+UMask=0077
+
+# Kernel and process isolation.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

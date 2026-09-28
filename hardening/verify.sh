@@ -2,9 +2,10 @@
 # verify.sh - show the Pi's hardening state. Read-only; changes nothing.
 # Run from a checkout of this repo on the Pi:  sudo hardening/verify.sh
 #
-# Prints ufw status, the fail2ban sshd jail, the effective sshd settings and the
-# healthchecks.io dead-man switch, then a summary of OK/FAIL checks. Exits 1 if
-# any check failed. Never prints the ping URLs themselves.
+# Prints ufw status, the fail2ban sshd jail, the effective sshd settings, the
+# healthchecks.io dead-man switch and the OpenCanary honeypot, then a summary of
+# OK/FAIL checks. Exits 1 if any check failed. Never prints the ping URLs or the
+# ntfy topic.
 
 set -uo pipefail   # no -e: keep going and report everything
 
@@ -13,6 +14,9 @@ set -uo pipefail   # no -e: keep going and report everything
 ROLLBACK=pi-hardening-ufw-rollback
 CONF=/etc/pi-maintenance.conf
 HB_STATUS=/run/pi-heartbeat.status
+CANARY_UNIT=/etc/systemd/system/opencanary.service
+CANARY_CRED=/etc/opencanaryd/ntfy-url
+CANARY_PORTS=(21 23 2222 3306 8080)   # keep in sync with canary/install.sh
 failures=0
 
 section() { printf '\n==> %s\n' "$*"; }
@@ -33,6 +37,14 @@ has_line() { grep -qx "$1" <<<"$2"; }
 # conf_has KEY: KEY has a non-empty value in $CONF. Greps rather than sources,
 # so nothing in the config is executed or printed.
 conf_has() { grep -Eq "^$1=[\"']?[^\"' ]" "$CONF" 2>/dev/null; }
+
+listening() { [[ -n $(ss -Hltn "sport = :$1") ]]; }
+
+# ufw_scoped PORT: PORT is allowed from the LAN and over tailscale0, and not
+# from Anywhere on every interface.
+ufw_scoped() {
+    grep -Eq "^$1/tcp +ALLOW IN .*from LAN" <<<"$ufw_status"         && grep -Eq "^$1/tcp on tailscale0 +ALLOW IN" <<<"$ufw_status"         && ! grep -Eq "^$1/tcp +ALLOW IN +Anywhere" <<<"$ufw_status"
+}
 
 heartbeat_recent() { [[ -n $(find "$HB_STATUS" -mmin -10 2>/dev/null) ]]; }
 
@@ -57,6 +69,16 @@ for key in HC_HEARTBEAT_URL HC_MAINT_URL; do
 done
 echo "Last heartbeat: $(cat "$HB_STATUS" 2>/dev/null || echo 'none since boot')"
 
+section "Honeypot (OpenCanary)"
+if [[ -f $CANARY_UNIT ]]; then
+    echo "Service: $(systemctl is-active opencanary)"
+    ss -Hltn "( $(printf 'sport = :%s or ' "${CANARY_PORTS[@]}") sport = :0 )"
+    events=$(journalctl -u opencanary --since -24h -o cat 2>/dev/null         | grep -Ec '"logtype": ([2-9][0-9]{3}|[0-9]{5})')
+    echo "Events in the last 24 h: $events (details: journalctl -u opencanary)"
+else
+    echo "Not installed (canary/install.sh)"
+fi
+
 section "Summary"
 check "ufw is active"                       has_line "Status: active" "$ufw_status"
 check "ufw denies incoming by default"      grep -q "Default: deny (incoming)" <<<"$ufw_status"
@@ -80,6 +102,17 @@ if conf_has HC_MAINT_URL; then
     echo "OK    maintenance check URL is set"
 else
     echo "SKIP  maintenance pings (HC_MAINT_URL not set)"
+fi
+
+if [[ -f $CANARY_UNIT ]]; then
+    check "honeypot is running"             systemctl is-active --quiet opencanary
+    for p in "${CANARY_PORTS[@]}"; do
+        check "honeypot listens on $p"      listening "$p"
+        check "ufw: $p only from LAN/tailnet" ufw_scoped "$p"
+    done
+    check "ntfy credential is root-only"    test "$(stat -c '%U %a' "$CANARY_CRED" 2>/dev/null)" = "root 600"
+else
+    echo "SKIP  honeypot checks (OpenCanary not installed)"
 fi
 
 if ((failures)); then
